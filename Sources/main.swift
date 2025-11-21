@@ -115,6 +115,67 @@ enum FuzzyMatcher {
     }
 }
 
+enum FzfFilter {
+    private static let candidatePaths = [
+        "/opt/homebrew/bin/fzf",
+        "/usr/local/bin/fzf",
+        "/usr/bin/fzf"
+    ]
+
+    private static func fzfExecutable() -> String? {
+        for path in candidatePaths {
+            if FileManager.default.isExecutableFile(atPath: path) {
+                return path
+            }
+        }
+        return nil
+    }
+
+    static func filter(query: String, items: [AppItem]) -> [AppItem]? {
+        guard let exe = fzfExecutable() else { return nil }
+        guard !query.isEmpty else { return items }
+
+        let input = items.map { "\($0.name)\t\($0.path)" }.joined(separator: "\n")
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: exe)
+        process.arguments = ["--filter", query, "--delimiter", "\t", "--with-nth=1,2", "--nth=1,2", "--no-sort", "--ansi"]
+
+        let stdinPipe = Pipe()
+        let stdoutPipe = Pipe()
+        process.standardInput = stdinPipe
+        process.standardOutput = stdoutPipe
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+        } catch {
+            NSLog("Failed to run fzf: \(error.localizedDescription)")
+            return nil
+        }
+
+        if let data = input.data(using: .utf8) {
+            stdinPipe.fileHandleForWriting.write(data)
+        }
+        stdinPipe.fileHandleForWriting.closeFile()
+
+        let outputData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else { return nil }
+        guard let output = String(data: outputData, encoding: .utf8) else { return nil }
+
+        var results: [AppItem] = []
+        for line in output.split(separator: "\n") {
+            let parts = line.split(separator: "\t", maxSplits: 1).map { String($0) }
+            guard parts.count == 2 else { continue }
+            results.append(AppItem(name: parts[0], path: parts[1]))
+        }
+
+        return results
+    }
+}
+
 @MainActor
 final class SearchField: NSSearchField {
     var onNavigate: ((Int) -> Void)?
@@ -202,6 +263,13 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
             cell = NSTableCellView()
             cell.identifier = identifier
 
+            let iconView = NSImageView()
+            iconView.wantsLayer = true
+            iconView.imageScaling = .scaleProportionallyUpOrDown
+            iconView.translatesAutoresizingMaskIntoConstraints = false
+            iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
+            iconView.setContentHuggingPriority(.required, for: .horizontal)
+
             let nameLabel = NSTextField(labelWithString: "")
             nameLabel.font = .systemFont(ofSize: 16, weight: .medium)
             nameLabel.lineBreakMode = .byTruncatingTail
@@ -216,22 +284,31 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
             pathLabel.tag = 2
             pathLabel.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
 
-            let stack = NSStackView(views: [nameLabel, pathLabel])
-            stack.orientation = .vertical
-            stack.edgeInsets = NSEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
-            stack.alignment = .left
-            stack.spacing = 2
+            let textStack = NSStackView(views: [nameLabel, pathLabel])
+            textStack.orientation = .vertical
+            textStack.spacing = 2
+            textStack.alignment = .left
 
-            stack.translatesAutoresizingMaskIntoConstraints = false
-            cell.addSubview(stack)
+            let rowStack = NSStackView(views: [iconView, textStack])
+            rowStack.orientation = .horizontal
+            rowStack.spacing = 10
+            rowStack.edgeInsets = NSEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
+            rowStack.alignment = .centerY
+
+            rowStack.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(rowStack)
             NSLayoutConstraint.activate([
-                stack.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
-                stack.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
-                stack.topAnchor.constraint(equalTo: cell.topAnchor),
-                stack.bottomAnchor.constraint(equalTo: cell.bottomAnchor)
+                iconView.widthAnchor.constraint(equalToConstant: 32),
+                iconView.heightAnchor.constraint(equalToConstant: 32),
+
+                rowStack.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
+                rowStack.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
+                rowStack.topAnchor.constraint(equalTo: cell.topAnchor),
+                rowStack.bottomAnchor.constraint(equalTo: cell.bottomAnchor)
             ])
 
             cell.textField = nameLabel
+            cell.imageView = iconView
         }
 
         if let nameLabel = cell.viewWithTag(1) as? NSTextField {
@@ -239,6 +316,9 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
         }
         if let pathLabel = cell.viewWithTag(2) as? NSTextField {
             pathLabel.stringValue = filtered[row].path
+        }
+        if let iconView = cell.imageView {
+            iconView.image = NSWorkspace.shared.icon(forFile: filtered[row].path)
         }
 
         return cell
@@ -378,24 +458,28 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
         if trimmed.isEmpty {
             filtered = apps
         } else {
-            let matches = apps.compactMap { item -> (Int, AppItem)? in
-                if let nameScore = FuzzyMatcher.matchScore(query: trimmed, candidate: item.name) {
-                    return (nameScore, item)
-                }
-                if let pathScore = FuzzyMatcher.matchScore(query: trimmed, candidate: item.path) {
-                    return (pathScore - 6, item)
-                }
-                return nil
-            }
-
-            filtered = matches
-                .sorted {
-                    if $0.0 == $1.0 {
-                        return $0.1.name.lowercased() < $1.1.name.lowercased()
+            if let fzfFiltered = FzfFilter.filter(query: trimmed, items: apps), !fzfFiltered.isEmpty {
+                filtered = fzfFiltered
+            } else {
+                let matches = apps.compactMap { item -> (Int, AppItem)? in
+                    if let nameScore = FuzzyMatcher.matchScore(query: trimmed, candidate: item.name) {
+                        return (nameScore, item)
                     }
-                    return $0.0 > $1.0
+                    if let pathScore = FuzzyMatcher.matchScore(query: trimmed, candidate: item.path) {
+                        return (pathScore - 6, item)
+                    }
+                    return nil
                 }
-                .map { $0.1 }
+
+                filtered = matches
+                    .sorted {
+                        if $0.0 == $1.0 {
+                            return $0.1.name.lowercased() < $1.1.name.lowercased()
+                        }
+                        return $0.0 > $1.0
+                    }
+                    .map { $0.1 }
+            }
         }
 
         tableView.reloadData()
