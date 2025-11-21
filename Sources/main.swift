@@ -277,6 +277,17 @@ final class SearchField: NSSearchField {
     var onConfirm: (() -> Void)?
     var onCancel: (() -> Void)?
 
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.contains(.command),
+           let chars = event.charactersIgnoringModifiers?.lowercased(),
+           chars == "a",
+           let editor = window?.fieldEditor(false, for: self) as? NSTextView {
+            editor.selectAll(nil)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
     override func keyDown(with event: NSEvent) {
         switch event.keyCode {
         case 125: // down
