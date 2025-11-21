@@ -292,7 +292,7 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
             let rowStack = NSStackView(views: [iconView, textStack])
             rowStack.orientation = .horizontal
             rowStack.spacing = 10
-            rowStack.edgeInsets = NSEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
+            rowStack.edgeInsets = NSEdgeInsetsZero
             rowStack.alignment = .centerY
 
             rowStack.translatesAutoresizingMaskIntoConstraints = false
@@ -379,6 +379,15 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
         searchField.delegate = self
         searchField.translatesAutoresizingMaskIntoConstraints = false
         searchField.focusRingType = .none
+        searchField.isBordered = false
+        searchField.drawsBackground = false
+        searchField.cell?.isBezeled = false
+        searchField.cell?.isBordered = false
+        searchField.cell?.backgroundStyle = .normal
+        if let cell = searchField.cell as? NSSearchFieldCell {
+            cell.searchButtonCell = nil
+            cell.cancelButtonCell = nil
+        }
         searchField.onNavigate = { [weak self] delta in self?.moveSelection(by: delta) }
         searchField.onConfirm = { [weak self] in self?.launchSelection() }
         searchField.onCancel = { [weak self] in self?.hide() }
@@ -388,16 +397,19 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
         scrollView.hasVerticalScroller = true
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = false
+        scrollView.contentView.drawsBackground = false
+        scrollView.contentInsets = NSEdgeInsetsZero
 
         tableView.translatesAutoresizingMaskIntoConstraints = false
         tableView.headerView = nil
-        tableView.rowHeight = 48
-        tableView.intercellSpacing = NSSize(width: 0, height: 2)
+        tableView.rowHeight = 40
+        tableView.intercellSpacing = NSSize(width: 0, height: 0)
         tableView.selectionHighlightStyle = .regular
         tableView.delegate = self
         tableView.dataSource = self
         tableView.target = self
         tableView.doubleAction = #selector(launchFromTable)
+        tableView.backgroundColor = .clear
 
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("AppColumn"))
         column.width = 540
@@ -408,15 +420,15 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
         contentView.addSubview(scrollView)
 
         NSLayoutConstraint.activate([
-            searchField.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 14),
-            searchField.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 14),
-            searchField.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -14),
-            searchField.heightAnchor.constraint(equalToConstant: 34),
+            searchField.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 10),
+            searchField.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
+            searchField.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
+            searchField.heightAnchor.constraint(equalToConstant: 28),
 
-            scrollView.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 12),
+            scrollView.topAnchor.constraint(equalTo: searchField.bottomAnchor),
             scrollView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -10)
+            scrollView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
         ])
 
         window.initialFirstResponder = searchField
