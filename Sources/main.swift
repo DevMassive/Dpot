@@ -12,10 +12,34 @@ struct AppIndexMetrics {
     let totalDuration: TimeInterval
 }
 
+struct UsageInfo: Codable {
+    var openCount: Int
+    var lastOpened: Date
+}
+
+struct UsageStore: Codable {
+    var records: [String: UsageInfo] = [:]
+
+    mutating func bump(path: String) {
+        let now = Date()
+        records[path, default: UsageInfo(openCount: 0, lastOpened: now)].openCount += 1
+        records[path]?.lastOpened = now
+    }
+
+    func scoreBoost(for path: String) -> Double {
+        guard let info = records[path] else { return 0 }
+        let freqBoost = log2(Double(info.openCount) + 1.0) * 5.0
+        let minutes = -info.lastOpened.timeIntervalSinceNow / 60.0
+        let recencyBoost = max(0, 100.0 - minutes * 0.5)
+        return freqBoost + recencyBoost
+    }
+}
+
 final class AppIndex: @unchecked Sendable {
     private let roots: [URL]
     private let queue = DispatchQueue(label: "dpot.appindex", qos: .utility)
     private var cachedItems: [AppItem] = []
+    private var usageStore: UsageStore = .init()
 
     init(roots: [URL]? = nil) {
         self.roots = roots ?? [
@@ -76,11 +100,48 @@ final class AppIndex: @unchecked Sendable {
     func refreshAsync(collectMetrics: Bool, completion: @escaping @Sendable ([AppItem], AppIndexMetrics?) -> Void) {
         queue.async { [weak self] in
             guard let self else { return }
+            self.loadUsage()
             let metrics = self.loadWithMetrics()
             self.cachedItems = metrics.items
             DispatchQueue.main.async {
                 completion(metrics.items, collectMetrics ? metrics : nil)
             }
+        }
+    }
+
+    func bumpUsage(for path: String) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.loadUsage()
+            self.usageStore.bump(path: path)
+            self.saveUsage()
+        }
+    }
+
+    func boost(for path: String) -> Double {
+        queue.sync {
+            usageStore.scoreBoost(for: path)
+        }
+    }
+
+    private var usageURL: URL {
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        return base.appendingPathComponent("DpotUsage.json")
+    }
+
+    private func loadUsage() {
+        let url = usageURL
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        guard let data = try? Data(contentsOf: url) else { return }
+        if let store = try? JSONDecoder().decode(UsageStore.self, from: data) {
+            usageStore = store
+        }
+    }
+
+    private func saveUsage() {
+        let url = usageURL
+        if let data = try? JSONEncoder().encode(usageStore) {
+            try? data.write(to: url)
         }
     }
 }
@@ -471,7 +532,7 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
             filtered = apps
         } else {
             if let fzfFiltered = FzfFilter.filter(query: trimmed, items: apps), !fzfFiltered.isEmpty {
-                filtered = fzfFiltered
+                filtered = scored(items: fzfFiltered, boost: true)
             } else {
                 let matches = apps.compactMap { item -> (Int, AppItem)? in
                     if let nameScore = FuzzyMatcher.matchScore(query: trimmed, candidate: item.name) {
@@ -488,11 +549,28 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
                         return $0.0 > $1.0
                     }
                     .map { $0.1 }
+                filtered = scored(items: filtered, boost: true)
             }
         }
 
         tableView.reloadData()
         selectRow(0)
+    }
+
+    private func scored(items: [AppItem], boost: Bool) -> [AppItem] {
+        guard boost else { return items }
+        return items
+            .map { item in
+                let bonus = appIndex.boost(for: item.path)
+                return (bonus, item)
+            }
+            .sorted {
+                if $0.0 == $1.0 {
+                    return $0.1.name.lowercased() < $1.1.name.lowercased()
+                }
+                return $0.0 > $1.0
+            }
+            .map { $0.1 }
     }
 
     private func moveSelection(by delta: Int) {
@@ -591,6 +669,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         launcherController = LauncherController(appIndex: appIndex)
         launcherController.onLaunch = { [weak self] item in
             self?.launchApp(at: item.path)
+            self?.appIndex.bumpUsage(for: item.path)
         }
 
         hotKey = HotKey(keyCode: UInt32(kVK_ANSI_0), modifiers: UInt32(controlKey)) { [weak self] in
