@@ -17,7 +17,8 @@ let package = Package(
             path: "Sources",
             linkerSettings: [
                 .linkedFramework("AppKit"),
-                .linkedFramework("Carbon")
+                .linkedFramework("Carbon"),
+                .linkedFramework("JavaScriptCore")
             ]),
         .testTarget(
             name: "DpotTests",

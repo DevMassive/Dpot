@@ -73,6 +73,18 @@ final class DpotTests: XCTestCase {
     }
 
     @MainActor
+    func testCalcEvaluatesAdditionAndFraction() {
+        let add = CalcEngine.evaluate("1+1")
+        XCTAssertEqual(add?.display, "2")
+
+        let frac = CalcEngine.evaluate("1/2")
+        XCTAssertEqual(frac?.display, "0.5")
+
+        let doubleSlash = CalcEngine.evaluate("1//2")
+        XCTAssertEqual(doubleSlash?.display, "0.5")
+    }
+
+    @MainActor
     func testEnterLaunchesSelectedApp() {
         let controller = LauncherController(appIndex: AppIndex(roots: []))
         let app = AppItem(name: "Foo", path: "/tmp/Foo.app")

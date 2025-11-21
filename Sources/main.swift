@@ -1,5 +1,6 @@
 import AppKit
 import Carbon
+import JavaScriptCore
 
 struct AppItem: Hashable {
     let name: String
@@ -10,6 +11,39 @@ struct AppIndexMetrics {
     let items: [AppItem]
     let rootDurations: [(root: URL, duration: TimeInterval, count: Int)]
     let totalDuration: TimeInterval
+}
+
+struct CalcResult {
+    let expression: String
+    let display: String
+}
+
+enum CalcEngine {
+    static func evaluate(_ text: String) -> CalcResult? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        // Limit to basic arithmetic symbols to avoid JS oddities.
+        let allowed = CharacterSet(charactersIn: "0123456789+-*/(). ")
+        guard trimmed.rangeOfCharacter(from: allowed.inverted) == nil else { return nil }
+
+        // Collapse accidental repeats like '//' -> '/'
+        let sanitized = trimmed.replacingOccurrences(of: "/{2,}", with: "/", options: .regularExpression)
+
+        guard let context = JSContext() else { return nil }
+        guard let jsValue = context.evaluateScript(sanitized) else { return nil }
+        if let exception = context.exception, !exception.isNull {
+            return nil
+        }
+        guard jsValue.isNumber, let number = jsValue.toNumber() else { return nil }
+
+        let formatter = NumberFormatter()
+        formatter.maximumFractionDigits = 6
+        formatter.minimumFractionDigits = 0
+        formatter.numberStyle = .decimal
+        let display = formatter.string(from: number) ?? number.stringValue
+        return CalcResult(expression: sanitized, display: display)
+    }
 }
 
 struct UsageInfo: Codable {
@@ -264,6 +298,7 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
     private let appIndex: AppIndex
     private var apps: [AppItem] = []
     private var filtered: [AppItem] = []
+    private var calcResult: CalcResult?
 
     private let window: NSPanel
     private let searchField = SearchField()
@@ -294,14 +329,17 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
         window.makeFirstResponder(searchField)
     }
 
-    func hide() {
+    func hide(clearQuery: Bool = false) {
         window.orderOut(nil)
-        searchField.stringValue = ""
+        if clearQuery {
+            searchField.stringValue = ""
+            lastQuery = ""
+        }
     }
 
     func toggle() {
-        if window.isVisible {
-            hide()
+        if window.isVisible && NSApp.isActive {
+            hide(clearQuery: false)
         } else {
             show()
         }
@@ -310,11 +348,15 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
     // MARK: - NSTableViewDataSource
 
     func numberOfRows(in tableView: NSTableView) -> Int {
-        filtered.count
+        filtered.count + (calcResult == nil ? 0 : 1)
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard row < filtered.count else { return nil }
+        let isCalcRow = calcResult != nil && row == 0
+        let appIndex = row - (calcResult == nil ? 0 : 1)
+        if !isCalcRow && appIndex >= filtered.count {
+            return nil
+        }
         let identifier = NSUserInterfaceItemIdentifier("AppCell")
 
         let cell: NSTableCellView
@@ -372,14 +414,27 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
             cell.imageView = iconView
         }
 
+        if isCalcRow, let calc = calcResult {
+            if let nameLabel = cell.viewWithTag(1) as? NSTextField {
+                nameLabel.stringValue = calc.display
+            }
+            if let pathLabel = cell.viewWithTag(2) as? NSTextField {
+                pathLabel.stringValue = calc.expression
+            }
+            if let iconView = cell.imageView {
+                iconView.image = NSImage(systemSymbolName: "function", accessibilityDescription: "Calc")
+            }
+            return cell
+        }
+        guard appIndex >= 0 && appIndex < filtered.count else { return cell }
         if let nameLabel = cell.viewWithTag(1) as? NSTextField {
-            nameLabel.stringValue = filtered[row].name
+            nameLabel.stringValue = filtered[appIndex].name
         }
         if let pathLabel = cell.viewWithTag(2) as? NSTextField {
-            pathLabel.stringValue = filtered[row].path
+            pathLabel.stringValue = filtered[appIndex].path
         }
         if let iconView = cell.imageView {
-            iconView.image = NSWorkspace.shared.icon(forFile: filtered[row].path)
+            iconView.image = NSWorkspace.shared.icon(forFile: filtered[appIndex].path)
         }
 
         return cell
@@ -403,7 +458,7 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
             launchSelection()
             return true
         case #selector(NSResponder.cancelOperation(_:)):
-            hide()
+            hide(clearQuery: true)
             return true
         default:
             return false
@@ -527,6 +582,7 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
     }
 
     private func applyFilter(_ query: String) {
+        calcResult = CalcEngine.evaluate(query)
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
             filtered = apps
@@ -574,16 +630,18 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
     }
 
     private func moveSelection(by delta: Int) {
-        guard !filtered.isEmpty else { return }
+        let totalRows = filtered.count + (calcResult == nil ? 0 : 1)
+        guard totalRows > 0 else { return }
         var row = tableView.selectedRow
         if row == -1 { row = 0 }
-        row = max(0, min(filtered.count - 1, row + delta))
+        row = max(0, min(totalRows - 1, row + delta))
         selectRow(row)
         tableView.scrollRowToVisible(row)
     }
 
     private func selectRow(_ row: Int) {
-        guard row >= 0, row < filtered.count else {
+        let totalRows = filtered.count + (calcResult == nil ? 0 : 1)
+        guard row >= 0, row < totalRows else {
             tableView.deselectAll(nil)
             return
         }
@@ -596,10 +654,21 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
 
     private func launchSelection() {
         let row = tableView.selectedRow == -1 ? 0 : tableView.selectedRow
-        guard row >= 0, row < filtered.count else { return }
-        let item = filtered[row]
+        let hasCalc = calcResult != nil
+        if hasCalc && row == 0 {
+            if let calc = calcResult {
+                let pboard = NSPasteboard.general
+                pboard.clearContents()
+                pboard.setString(calc.display, forType: .string)
+            }
+            hide(clearQuery: false)
+            return
+        }
+        let index = row - (hasCalc ? 1 : 0)
+        guard index >= 0, index < filtered.count else { return }
+        let item = filtered[index]
         onLaunch?(item)
-        hide()
+        hide(clearQuery: true)
     }
 
 #if DEBUG
