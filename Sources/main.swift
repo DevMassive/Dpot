@@ -139,7 +139,7 @@ enum FzfFilter {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: exe)
-        process.arguments = ["--filter", query, "--delimiter", "\t", "--with-nth=1,2", "--nth=1,2", "--no-sort", "--ansi"]
+        process.arguments = ["--filter", query, "--delimiter", "\t", "--nth=1", "--with-nth=1,2", "--no-sort", "--ansi"]
 
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
@@ -476,9 +476,6 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
                 let matches = apps.compactMap { item -> (Int, AppItem)? in
                     if let nameScore = FuzzyMatcher.matchScore(query: trimmed, candidate: item.name) {
                         return (nameScore, item)
-                    }
-                    if let pathScore = FuzzyMatcher.matchScore(query: trimmed, candidate: item.path) {
-                        return (pathScore - 6, item)
                     }
                     return nil
                 }
