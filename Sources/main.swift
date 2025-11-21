@@ -6,8 +6,16 @@ struct AppItem: Hashable {
     let path: String
 }
 
-final class AppIndex {
+struct AppIndexMetrics {
+    let items: [AppItem]
+    let rootDurations: [(root: URL, duration: TimeInterval, count: Int)]
+    let totalDuration: TimeInterval
+}
+
+final class AppIndex: @unchecked Sendable {
     private let roots: [URL]
+    private let queue = DispatchQueue(label: "dpot.appindex", qos: .utility)
+    private var cachedItems: [AppItem] = []
 
     init(roots: [URL]? = nil) {
         self.roots = roots ?? [
@@ -19,15 +27,23 @@ final class AppIndex {
     }
 
     func load() -> [AppItem] {
+        loadWithMetrics().items
+    }
+
+    func loadWithMetrics() -> AppIndexMetrics {
+        let totalStart = Date()
         let fm = FileManager.default
         var seen = Set<String>()
         var items: [AppItem] = []
+        var rootDurations: [(URL, TimeInterval, Int)] = []
 
         for root in roots where fm.fileExists(atPath: root.path) {
+            let start = Date()
+            var rootCount = 0
             guard let enumerator = fm.enumerator(
                 at: root,
                 includingPropertiesForKeys: [.isDirectoryKey],
-                options: [.skipsHiddenFiles]) else { continue }
+                options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]) else { continue }
 
             for case let url as URL in enumerator {
                 guard url.pathExtension == "app" else { continue }
@@ -43,10 +59,29 @@ final class AppIndex {
                 seen.insert(path)
                 items.append(AppItem(name: url.deletingPathExtension().lastPathComponent, path: path))
                 enumerator.skipDescendants()
+                rootCount += 1
             }
+
+            rootDurations.append((root, Date().timeIntervalSince(start), rootCount))
         }
 
-        return items.sorted { $0.name.lowercased() < $1.name.lowercased() }
+        let sorted = items.sorted { $0.name.lowercased() < $1.name.lowercased() }
+        return AppIndexMetrics(items: sorted, rootDurations: rootDurations, totalDuration: Date().timeIntervalSince(totalStart))
+    }
+
+    func cachedItemsSnapshot() -> [AppItem] {
+        queue.sync { cachedItems }
+    }
+
+    func refreshAsync(collectMetrics: Bool, completion: @escaping @Sendable ([AppItem], AppIndexMetrics?) -> Void) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let metrics = self.loadWithMetrics()
+            self.cachedItems = metrics.items
+            DispatchQueue.main.async {
+                completion(metrics.items, collectMetrics ? metrics : nil)
+            }
+        }
     }
 }
 
@@ -111,6 +146,7 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
     private let window: NSPanel
     private let searchField = SearchField()
     private let tableView = NSTableView()
+    private var lastQuery: String = ""
 
     var onLaunch: ((AppItem) -> Void)?
 
@@ -141,6 +177,14 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
         searchField.stringValue = ""
     }
 
+    func toggle() {
+        if window.isVisible {
+            hide()
+        } else {
+            show()
+        }
+    }
+
     // MARK: - NSTableViewDataSource
 
     func numberOfRows(in tableView: NSTableView) -> Int {
@@ -162,17 +206,21 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
             nameLabel.font = .systemFont(ofSize: 16, weight: .medium)
             nameLabel.lineBreakMode = .byTruncatingTail
             nameLabel.tag = 1
+            nameLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+            nameLabel.setContentHuggingPriority(.required, for: .vertical)
 
             let pathLabel = NSTextField(labelWithString: "")
             pathLabel.font = .systemFont(ofSize: 11)
             pathLabel.textColor = .secondaryLabelColor
             pathLabel.lineBreakMode = .byTruncatingMiddle
             pathLabel.tag = 2
+            pathLabel.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
 
             let stack = NSStackView(views: [nameLabel, pathLabel])
             stack.orientation = .vertical
             stack.edgeInsets = NSEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
             stack.alignment = .left
+            stack.spacing = 2
 
             stack.translatesAutoresizingMaskIntoConstraints = false
             cell.addSubview(stack)
@@ -222,7 +270,8 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
     }
 
     func controlTextDidChange(_ obj: Notification) {
-        applyFilter(searchField.stringValue)
+        lastQuery = searchField.stringValue
+        applyFilter(lastQuery)
     }
 
     // MARK: - Private
@@ -262,7 +311,7 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
 
         tableView.translatesAutoresizingMaskIntoConstraints = false
         tableView.headerView = nil
-        tableView.rowHeight = 38
+        tableView.rowHeight = 48
         tableView.intercellSpacing = NSSize(width: 0, height: 2)
         tableView.selectionHighlightStyle = .regular
         tableView.delegate = self
@@ -294,8 +343,34 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
     }
 
     private func reloadApps() {
-        apps = appIndex.load()
-        applyFilter(searchField.stringValue)
+        let query = searchField.stringValue
+        lastQuery = query
+
+        let cached = appIndex.cachedItemsSnapshot()
+        if !cached.isEmpty {
+            apps = cached
+            applyFilter(query)
+        } else {
+            apps = []
+            filtered = []
+            tableView.reloadData()
+        }
+
+        let shouldLog = ProcessInfo.processInfo.environment["DPOT_LOG_INDEX"] != nil
+        appIndex.refreshAsync(collectMetrics: shouldLog) { [weak self] items, metrics in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.apps = items
+                self.applyFilter(self.lastQuery)
+
+                #if DEBUG
+                if shouldLog, let metrics {
+                    let perRoot = metrics.rootDurations.map { "\($0.count) in \($0.root.lastPathComponent)=\(String(format: "%.3f", $0.duration))s" }.joined(separator: ", ")
+                    NSLog("Index load: total=\(String(format: "%.3f", metrics.totalDuration))s count=\(metrics.items.count) [\(perRoot)]")
+                }
+                #endif
+            }
+        }
     }
 
     private func applyFilter(_ query: String) {
@@ -427,7 +502,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         hotKey = HotKey(keyCode: UInt32(kVK_ANSI_0), modifiers: UInt32(controlKey)) { [weak self] in
             Task { @MainActor [weak self] in
-                self?.launcherController.show()
+                self?.launcherController.toggle()
             }
         }
     }

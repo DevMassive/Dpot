@@ -35,6 +35,44 @@ final class DpotTests: XCTestCase {
     }
 
     @MainActor
+    func testAppIndexMetricsCountsPerRoot() throws {
+        let rootA = try makeTempRoot()
+        let rootB = try makeTempRoot()
+        defer {
+            try? FileManager.default.removeItem(at: rootA)
+            try? FileManager.default.removeItem(at: rootB)
+        }
+
+        try makeApp(at: rootA.appendingPathComponent("Foo.app"))
+        try makeApp(at: rootA.appendingPathComponent("Bar.app"))
+        try makeApp(at: rootB.appendingPathComponent("Baz.app"))
+
+        let index = AppIndex(roots: [rootA, rootB])
+        let metrics = index.loadWithMetrics()
+
+        XCTAssertEqual(metrics.items.count, 3)
+        XCTAssertEqual(metrics.rootDurations.count, 2)
+        XCTAssertEqual(metrics.rootDurations.map { $0.count }.reduce(0, +), 3)
+    }
+
+    @MainActor
+    func testRefreshAsyncCachesAndReturns() {
+        let root = try! makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try? makeApp(at: root.appendingPathComponent("Foo.app"))
+
+        let index = AppIndex(roots: [root])
+        let exp = expectation(description: "refresh")
+        index.refreshAsync(collectMetrics: true) { items, metrics in
+            XCTAssertEqual(items.count, 1)
+            XCTAssertEqual(index.cachedItemsSnapshot().count, 1)
+            XCTAssertNotNil(metrics)
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 2.0)
+    }
+
+    @MainActor
     func testEnterLaunchesSelectedApp() {
         let controller = LauncherController(appIndex: AppIndex(roots: []))
         let app = AppItem(name: "Foo", path: "/tmp/Foo.app")
