@@ -22,10 +22,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Swift 6
-        uses: swift-actions/setup-swift@v1
-        with:
-          swift-version: "6.0"
+      - name: Install Swift 6 toolchain
+        run: |
+          set -euo pipefail
+          SWIFT_PKG_URL="https://download.swift.org/swift-6.0-release/xcode/swift-6.0-RELEASE/swift-6.0-RELEASE-osx.pkg"
+          echo "Downloading Swift from $SWIFT_PKG_URL"
+          curl -L "$SWIFT_PKG_URL" -o /tmp/swift.pkg
+          sudo installer -pkg /tmp/swift.pkg -target /
+          swift --version
 
       - name: Build app bundle
         run: ./Scripts/build-app.sh
