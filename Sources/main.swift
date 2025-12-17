@@ -792,6 +792,12 @@ struct DpotMain {
         let delegate = AppDelegate()
         app.delegate = delegate
         app.setActivationPolicy(.accessory)
+
+        if CommandLine.arguments.contains("--smoke-test") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                app.terminate(nil)
+            }
+        }
         app.run()
     }
 }
