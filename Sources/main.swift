@@ -67,6 +67,10 @@ struct UsageStore: Codable {
         let recencyBoost = max(0, 100.0 - minutes * 0.5)
         return freqBoost + recencyBoost
     }
+
+    func openCount(for path: String) -> Int {
+        records[path]?.openCount ?? 0
+    }
 }
 
 final class AppIndex: @unchecked Sendable {
@@ -74,14 +78,16 @@ final class AppIndex: @unchecked Sendable {
     private let queue = DispatchQueue(label: "dpot.appindex", qos: .utility)
     private var cachedItems: [AppItem] = []
     private var usageStore: UsageStore = .init()
+    private let customUsageURL: URL?
 
-    init(roots: [URL]? = nil) {
+    init(roots: [URL]? = nil, usageURL: URL? = nil) {
         self.roots = roots ?? [
             URL(fileURLWithPath: "/Applications"),
             URL(fileURLWithPath: "/System/Applications"),
             URL(fileURLWithPath: "/System/Applications/Utilities"),
             URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Applications")
         ]
+        self.customUsageURL = usageURL
     }
 
     func load() -> [AppItem] {
@@ -115,7 +121,8 @@ final class AppIndex: @unchecked Sendable {
                     continue
                 }
                 seen.insert(path)
-                items.append(AppItem(name: url.deletingPathExtension().lastPathComponent, path: path))
+                let standardizedPath = url.standardizedFileURL.path
+                items.append(AppItem(name: url.deletingPathExtension().lastPathComponent, path: standardizedPath))
                 enumerator.skipDescendants()
                 rootCount += 1
             }
@@ -146,19 +153,29 @@ final class AppIndex: @unchecked Sendable {
     func bumpUsage(for path: String) {
         queue.async { [weak self] in
             guard let self else { return }
+            let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
             self.loadUsage()
-            self.usageStore.bump(path: path)
+            self.usageStore.bump(path: standardized)
             self.saveUsage()
         }
     }
 
     func boost(for path: String) -> Double {
         queue.sync {
-            usageStore.scoreBoost(for: path)
+            let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
+            return usageStore.scoreBoost(for: standardized)
+        }
+    }
+
+    func openCount(for path: String) -> Int {
+        queue.sync {
+            let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
+            return usageStore.openCount(for: standardized)
         }
     }
 
     private var usageURL: URL {
+        if let custom = customUsageURL { return custom }
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: NSTemporaryDirectory())
         return base.appendingPathComponent("DpotUsage.json")
     }
@@ -180,12 +197,18 @@ final class AppIndex: @unchecked Sendable {
     }
 }
 
+extension String {
+    func normalizedForSearch() -> String {
+        self.applyingTransform(.fullwidthToHalfwidth, reverse: false)?.lowercased() ?? self.lowercased()
+    }
+}
+
 enum FuzzyMatcher {
     static func matchScore(query: String, candidate: String) -> Int? {
         if query.isEmpty { return 0 }
 
-        let q = query.lowercased()
-        let text = candidate.lowercased()
+        let q = query.normalizedForSearch()
+        let text = candidate.normalizedForSearch()
         var score = 0
         var searchIndex = text.startIndex
 
@@ -230,11 +253,12 @@ enum FzfFilter {
         guard let exe = fzfExecutable() else { return nil }
         guard !query.isEmpty else { return items }
 
+        let normalizedQuery = query.normalizedForSearch()
         let input = items.map { "\($0.name)\t\($0.path)" }.joined(separator: "\n")
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: exe)
-        process.arguments = ["--filter", query, "--delimiter", "\t", "--nth=1", "--with-nth=1,2", "--no-sort", "--ansi"]
+        process.arguments = ["--filter", normalizedQuery, "--delimiter", "\t", "--nth=1", "--with-nth=1,2", "--no-sort", "--ansi"]
 
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
@@ -391,19 +415,7 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
             nameLabel.setContentCompressionResistancePriority(.required, for: .vertical)
             nameLabel.setContentHuggingPriority(.required, for: .vertical)
 
-            let pathLabel = NSTextField(labelWithString: "")
-            pathLabel.font = .systemFont(ofSize: 11)
-            pathLabel.textColor = .secondaryLabelColor
-            pathLabel.lineBreakMode = .byTruncatingMiddle
-            pathLabel.tag = 2
-            pathLabel.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
-
-            let textStack = NSStackView(views: [nameLabel, pathLabel])
-            textStack.orientation = .vertical
-            textStack.spacing = 2
-            textStack.alignment = .left
-
-            let rowStack = NSStackView(views: [iconView, textStack])
+            let rowStack = NSStackView(views: [iconView, nameLabel])
             rowStack.orientation = .horizontal
             rowStack.spacing = 10
             rowStack.edgeInsets = NSEdgeInsetsZero
@@ -429,9 +441,6 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
             if let nameLabel = cell.viewWithTag(1) as? NSTextField {
                 nameLabel.stringValue = calc.display
             }
-            if let pathLabel = cell.viewWithTag(2) as? NSTextField {
-                pathLabel.stringValue = calc.expression
-            }
             if let iconView = cell.imageView {
                 iconView.image = NSImage(systemSymbolName: "function", accessibilityDescription: "Calc")
             }
@@ -440,9 +449,6 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
         guard appIndex >= 0 && appIndex < filtered.count else { return cell }
         if let nameLabel = cell.viewWithTag(1) as? NSTextField {
             nameLabel.stringValue = filtered[appIndex].name
-        }
-        if let pathLabel = cell.viewWithTag(2) as? NSTextField {
-            pathLabel.stringValue = filtered[appIndex].path
         }
         if let iconView = cell.imageView {
             iconView.image = NSWorkspace.shared.icon(forFile: filtered[appIndex].path)
@@ -596,7 +602,7 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
         calcResult = CalcEngine.evaluate(query)
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
-            filtered = apps
+            filtered = scored(items: apps, boost: true)
         } else {
             if let fzfFiltered = FzfFilter.filter(query: trimmed, items: apps), !fzfFiltered.isEmpty {
                 filtered = scored(items: fzfFiltered, boost: true)
@@ -628,8 +634,8 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
         guard boost else { return items }
         return items
             .map { item in
-                let bonus = appIndex.boost(for: item.path)
-                return (bonus, item)
+                let count = appIndex.openCount(for: item.path)
+                return (count, item)
             }
             .sorted {
                 if $0.0 == $1.0 {
@@ -700,6 +706,11 @@ final class LauncherController: NSObject, NSTableViewDataSource, NSTableViewDele
 
     var selectedAppForTesting: AppItem? {
         let row = tableView.selectedRow
+        guard row >= 0, row < filtered.count else { return nil }
+        return filtered[row]
+    }
+
+    func appAtRowForTesting(_ row: Int) -> AppItem? {
         guard row >= 0, row < filtered.count else { return nil }
         return filtered[row]
     }
