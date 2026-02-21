@@ -38,9 +38,10 @@ enum CalcEngine {
         guard jsValue.isNumber, let number = jsValue.toNumber() else { return nil }
 
         let formatter = NumberFormatter()
-        formatter.maximumFractionDigits = 6
-        formatter.minimumFractionDigits = 0
         formatter.numberStyle = .decimal
+        formatter.usesSignificantDigits = true
+        formatter.maximumSignificantDigits = 10
+        formatter.minimumSignificantDigits = 1
         let display = formatter.string(from: number) ?? number.stringValue
         return CalcResult(expression: sanitized, display: display)
     }

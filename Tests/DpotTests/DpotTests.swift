@@ -85,6 +85,12 @@ final class DpotTests: XCTestCase {
     }
 
     @MainActor
+    func testCalcPrecision() {
+        let small = CalcEngine.evaluate("1/3333333")
+        XCTAssertEqual(small?.display, "0.00000030000003")
+    }
+
+    @MainActor
     func testEnterLaunchesSelectedApp() {
         let controller = LauncherController(appIndex: AppIndex(roots: []))
         let app = AppItem(name: "Foo", path: "/tmp/Foo.app")
